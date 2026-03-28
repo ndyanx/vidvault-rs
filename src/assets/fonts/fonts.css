@@ -1,0 +1,61 @@
+/* ─── Syne ───────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Syne';
+  font-weight: 400;
+  font-display: swap;
+  src: url('./Syne-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Syne';
+  font-weight: 500;
+  font-display: swap;
+  src: url('./Syne-Medium.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Syne';
+  font-weight: 600;
+  font-display: swap;
+  src: url('./Syne-SemiBold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Syne';
+  font-weight: 700;
+  font-display: swap;
+  src: url('./Syne-Bold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Syne';
+  font-weight: 800;
+  font-display: swap;
+  src: url('./Syne-ExtraBold.ttf') format('truetype');
+}
+
+/* ─── DM Mono ────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'DM Mono';
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+  src: url('./DMMono-Light.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+  src: url('./DMMono-LightItalic.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url('./DMMono-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url('./DMMono-Medium.ttf') format('truetype');
+}

@@ -1,0 +1,132 @@
+/* ─── Fonts ─────────────────────────────────────────────────────────────── */
+/* Syne: display headings / UI labels — geometric, distinctive              */
+/* DM Mono: metadata, file info — technical, readable                       */
+@import "../assets/fonts/fonts.css";
+
+/* ─── Theme tokens ───────────────────────────────────────────────────────  */
+:root {
+    /* ── Light mode — warm off-white, clear surfaces ── */
+    --bg-app: #f0ede8;
+    --bg-surface: #f7f5f2;
+    --bg-elevated: #ffffff;
+    --bg-overlay: #ece9e4;
+    --bg-input: #ffffff;
+
+    --border-subtle: rgba(0, 0, 0, 0.07);
+    --border-medium: rgba(0, 0, 0, 0.13);
+    --border-strong: rgba(0, 0, 0, 0.22);
+
+    --text-primary: #1a1714;
+    --text-secondary: #6b6460;
+    --text-tertiary: #a09890;
+    --text-on-accent: #ffffff;
+
+    --accent: #c84b2f;
+    --accent-hover: #b03d23;
+    --accent-subtle: rgba(200, 75, 47, 0.09);
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.07), 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.09), 0 2px 4px rgba(0, 0, 0, 0.05);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.07);
+    --shadow-modal:
+        0 24px 64px rgba(0, 0, 0, 0.18), 0 8px 16px rgba(0, 0, 0, 0.09);
+
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 16px;
+    --radius-xl: 22px;
+
+    --font-display: "Syne", sans-serif;
+    --font-mono: "DM Mono", monospace;
+
+    /* Skeleton shimmer colors */
+    --skeleton-base: #e8e4df;
+    --skeleton-shine: #f5f2ee;
+}
+
+[data-theme="dark"] {
+    /* ── Dark mode — deep warm charcoal ── */
+    --bg-app: #141210;
+    --bg-surface: #1c1917;
+    --bg-elevated: #242120;
+    --bg-overlay: #1a1816;
+    --bg-input: #1e1c1a;
+
+    --border-subtle: rgba(255, 255, 255, 0.06);
+    --border-medium: rgba(255, 255, 255, 0.11);
+    --border-strong: rgba(255, 255, 255, 0.2);
+
+    --text-primary: #f0ede8;
+    --text-secondary: #9a918a;
+    --text-tertiary: #5e564f;
+    --text-on-accent: #ffffff;
+
+    --accent: #e8613c;
+    --accent-hover: #f06e4a;
+    --accent-subtle: rgba(232, 97, 60, 0.13);
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+    --shadow-modal:
+        0 24px 64px rgba(0, 0, 0, 0.75), 0 8px 16px rgba(0, 0, 0, 0.45);
+
+    /* Skeleton shimmer colors */
+    --skeleton-base: #1e1c1a;
+    --skeleton-shine: #2a2724;
+}
+
+/* ─── Reset ──────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: var(--font-display);
+    background: var(--bg-app);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+    /* Smooth theme transitions */
+    transition:
+        background 0.2s ease,
+        color 0.2s ease;
+}
+
+/* Allow text selection inside metadata/file info */
+.selectable {
+    user-select: text;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-tertiary);
+}
+
+/* Focus visible */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}

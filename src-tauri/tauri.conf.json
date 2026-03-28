@@ -1,0 +1,29 @@
+{
+  "productName": "VidVault",
+  "version": "0.1.0",
+  "identifier": "com.vidvault.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "VidVault",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 600,
+        "minHeight": 500,
+        "decorations": false,
+        "transparent": false,
+        "additionalBrowserArgs": "--allow-running-insecure-content --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: http://asset.localhost localvideo: http://localvideo.localhost https://localvideo.localhost blob: data:; media-src 'self' asset: http://asset.localhost localvideo: http://localvideo.localhost https://localvideo.localhost http://127.0.0.1:* blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
+    }
+  }
+}
