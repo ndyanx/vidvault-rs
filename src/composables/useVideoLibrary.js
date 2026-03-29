@@ -43,6 +43,15 @@ let unlistenNoStream = null;
 let unlistenFolderChanged = null;
 let initPromise = null;
 
+// FIX: guard contra applyDiff concurrentes.
+// Si llegan dos folder:changed antes de que el primero resuelva el invoke,
+// ambos calculaban existingIds sobre el mismo videos.value (aún sin el nuevo
+// video) y ambos pasaban el filtro → dos cards del mismo archivo con tamaños
+// distintos (el archivo crecía entre las dos llamadas).
+// La promise actúa como mutex: el segundo applyDiff espera al primero y al
+// resolverse ya ve el id en existingIds → no duplica la card.
+let applyDiffPromise = Promise.resolve();
+
 async function ensureListeners() {
   if (unlistenThumbnail) return;
 
@@ -95,16 +104,38 @@ export function useVideoLibrary() {
     currentFolder.value ? folderNameFrom(currentFolder.value) : null,
   );
 
-  async function applyDiff(addedPaths) {
-    if (!addedPaths.length) return;
-    const result = await invoke("fs_read_videos", {
-      dirPath: currentFolder.value,
-    });
-    if (!Array.isArray(result)) return;
+  // FIX: applyDiff serializada mediante promise-chain.
+  // Cada invocación se encola detrás de la anterior, de modo que existingIds
+  // siempre se calcula sobre un videos.value ya actualizado por la llamada previa.
+  // Además ya no llama fs_read_videos (que internamente reiniciaba el watcher):
+  // en su lugar usa el nuevo command fs_read_video_entries que solo devuelve
+  // la metadata de los paths específicos sin tocar el watcher ni el pipeline.
+  function applyDiff(addedPaths) {
+    applyDiffPromise = applyDiffPromise.then(() => _applyDiffOnce(addedPaths));
+  }
+
+  async function _applyDiffOnce(addedPaths) {
+    if (!addedPaths.length || !currentFolder.value) return;
+
+    // Pedir solo la metadata de los paths nuevos, sin reiniciar el watcher.
+    // fs_read_video_entries es un command ligero que no llama watcher::start.
+    let entries;
+    try {
+      entries = await invoke("fs_read_video_entries", {
+        filePaths: addedPaths,
+      });
+    } catch (e) {
+      console.error("[applyDiff] fs_read_video_entries error:", e);
+      return;
+    }
+
+    if (!Array.isArray(entries) || !entries.length) return;
+
     const existingIds = new Set(videos.value.map((v) => v.id));
-    const newVideos = result
-      .filter((v) => addedPaths.includes(v.filePath) && !existingIds.has(v.id))
+    const newVideos = entries
+      .filter((v) => !existingIds.has(v.id))
       .map((v) => ({ ...v, sizeFormatted: formatSize(v.size) }));
+
     if (newVideos.length) {
       videos.value = [...newVideos, ...videos.value];
       const newPaths = newVideos.map((v) => v.filePath);
@@ -123,16 +154,16 @@ export function useVideoLibrary() {
     videos.value = [];
     currentFolder.value = folderPath;
 
+    // Resetear la cola de applyDiff al cambiar de carpeta
+    applyDiffPromise = Promise.resolve();
+
     await ensureListeners();
     await ensureFolderWatcher(loadFolder, applyDiff);
 
     try {
       const result = await invoke("fs_read_videos", { dirPath: folderPath });
 
-      // FIX: usar Array.isArray como guard primario — el enum untagged de Rust
-      // serializa el caso error como objeto { error: "..." } y el éxito como array.
       if (!Array.isArray(result)) {
-        // Es el caso error
         const errType = result?.error || "read_error";
         if (errType === "not_found") {
           error.value = { type: "not_found", folder: folderPath };
@@ -154,10 +185,6 @@ export function useVideoLibrary() {
         sizeFormatted: formatSize(v.size),
       }));
 
-      // FIX: arrancar el pipeline con los primeros videos inmediatamente,
-      // sin esperar al scroll. El virtual scroll puede tardar un tick en
-      // calcular qué items son visibles, y mientras tanto la queue está vacía.
-      // 20 videos es suficiente para llenar cualquier viewport inicial.
       const seedPaths = result.slice(0, 20).map((v) => v.filePath);
       if (seedPaths.length) {
         invoke("pipeline_process", { filePaths: seedPaths }).catch(

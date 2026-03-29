@@ -17,6 +17,17 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify, Semaphore};
 
+// FIX: En Windows build (subsistema GUI), los procesos hijo como ffprobe/ffmpeg
+// son binarios de consola. Sin este flag, Windows les abre una ventana de
+// consola temporal por cada invocación — el "flash" visible en release.
+// CREATE_NO_WINDOW (0x08000000) le dice al kernel que cree el proceso sin
+// asignarle ninguna ventana de consola.
+// En dev esto no ocurre porque el proceso padre ya tiene una consola (la
+// terminal de cargo/tauri-cli) que los hijos heredan.
+// Ref: https://learn.microsoft.com/windows/win32/procthread/process-creation-flags
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const CONCURRENCY: usize = 4;
 
 // ── Events emitted to renderer ────────────────────────────────────────────────
@@ -118,6 +129,16 @@ impl PipelineHandle {
         g.queue.clear();
         g.in_flight.clear();
         g.video_map = map;
+    }
+
+    /// Called by fs:read_video_entries to register new videos detected by the
+    /// watcher without resetting the existing map or cancelling in-flight work.
+    /// Without this, pipeline_process called from applyDiff would look up the
+    /// new file path in video_map, find nothing, and silently skip it —
+    /// leaving the card without a thumbnail forever.
+    pub async fn insert_video_meta(&self, file_path: String, meta: VideoMeta) {
+        let mut g = self.0.inner.lock().await;
+        g.video_map.insert(file_path, meta);
     }
 
     /// Reprioritize queue: visible first, lookahead after, drop off-screen.
@@ -373,23 +394,30 @@ fn find_binary(name: &str) -> String {
 // ── ffprobe ───────────────────────────────────────────────────────────────────
 
 pub async fn probe_video(file_path: &str) -> Option<VideoDims> {
-    let output = Command::new(find_binary("ffprobe"))
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-select_streams",
-            "v:0",
-            file_path,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
+    // FIX: En Windows build (subsistema GUI), sin CREATE_NO_WINDOW cada llamada
+    // a ffprobe abre y cierra una ventana de consola brevemente (el "flash").
+    let mut cmd = Command::new(find_binary("ffprobe"));
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-select_streams",
+        "v:0",
+        file_path,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd.output().await.ok()?;
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let stream = json.get("streams")?.get(0)?;
@@ -449,27 +477,34 @@ pub async fn generate_thumbnail(
         tokio::fs::create_dir_all(parent).await.ok()?;
     }
 
-    let status = Command::new(find_binary("ffmpeg"))
-        .args([
-            "-ss",
-            "1",
-            "-i",
-            file_path,
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=480:-2",
-            "-q:v",
-            "2",
-            "-y",
-            out_path.to_str()?,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
-        .await
-        .ok()?;
+    // FIX: igual que probe_video — CREATE_NO_WINDOW evita el flash de consola
+    // en Windows build al generar cada thumbnail con ffmpeg.
+    let mut cmd = Command::new(find_binary("ffmpeg"));
+    cmd.args([
+        "-ss",
+        "1",
+        "-i",
+        file_path,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=480:-2",
+        "-q:v",
+        "2",
+        "-y",
+        out_path.to_str()?,
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let status = cmd.status().await.ok()?;
 
     if status.success() {
         Some(out_path.clone())

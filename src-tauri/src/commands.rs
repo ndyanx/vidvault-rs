@@ -84,7 +84,7 @@ pub async fn store_get_folder_thumb(
     Ok(result)
 }
 
-// ── fs:readVideos ─────────────────────────────────────────────────────────────
+// ── Shared types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +111,8 @@ pub enum ReadVideosResult {
     Error { error: String },
     Videos(Vec<VideoEntry>),
 }
+
+// ── fs:readVideos ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn fs_read_videos<R: Runtime>(
@@ -234,6 +236,134 @@ pub async fn fs_read_videos<R: Runtime>(
     watcher::start(&app, dir_path.clone()).await;
 
     Ok(ReadVideosResult::Videos(videos))
+}
+
+// ── fs:readVideoEntries ───────────────────────────────────────────────────────
+// Command ligero usado por applyDiff en el renderer.
+// Recibe los paths específicos detectados por el watcher como nuevos y devuelve
+// su metadata lista para mostrar en la UI, sin hacer walk completo del
+// directorio, sin reiniciar el watcher y sin tocar el pipeline.
+//
+// Por qué existe: applyDiff antes llamaba fs_read_videos, que hace un walk
+// completo Y llama watcher::start (que internamente hace stop() → nuevo
+// watcher), introduciendo una ventana ciega donde se pierden eventos del OS.
+
+#[tauri::command]
+pub async fn fs_read_video_entries(
+    file_paths: Vec<String>,
+    state: State<'_, AppStateHandle>,
+    pipeline: State<'_, PipelineHandle>,
+    server: State<'_, VideoServerState>,
+) -> Result<Vec<VideoEntry>, String> {
+    if file_paths.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut entries = Vec::new();
+
+    for file_path in &file_paths {
+        let path = Path::new(file_path);
+
+        // Stat del archivo — si no existe o no es accesible, se omite
+        let meta = match tokio::fs::metadata(path).await {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e.to_ascii_lowercase(),
+            None => continue,
+        };
+
+        if !is_video_ext(&ext) {
+            continue;
+        }
+
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        let created_at = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(mtime);
+
+        let id = video_id(file_path);
+
+        // Leer dims del cache si están disponibles. Para un archivo recién
+        // descargado normalmente no estarán aún — el pipeline las generará
+        // después de que applyDiff llame pipeline_process.
+        let maybe_entry = state
+            .read_dim_cache(|cache| {
+                let dims = cache.get(file_path.as_str());
+                let thumb_path = thumb_path_for_file(file_path);
+                let thumb_url = if thumb_path.exists() {
+                    Some(thumb_url_for_path(&thumb_path))
+                } else {
+                    None
+                };
+                if let Some(d) = dims {
+                    // Archivo conocido como sin stream válido con mismo mtime — omitir
+                    if d.no_stream && (d.mtime - mtime).abs() < 1.0 {
+                        return None;
+                    }
+                    Some((d.width, d.height, d.duration, thumb_url))
+                } else {
+                    Some((None, None, None, thumb_url))
+                }
+            })
+            .await;
+
+        let (width, height, duration, thumbnail_url) = match maybe_entry {
+            Some(t) => t,
+            None => continue, // known no_stream — skip
+        };
+
+        let entry = VideoEntry {
+            id: id.clone(),
+            file_name,
+            file_path: file_path.clone(),
+            video_url: video_url_for_path(&std::path::PathBuf::from(file_path), server.port()),
+            size: meta.len(),
+            mtime,
+            created_at,
+            modified_at: mtime,
+            ext: ext.to_uppercase(),
+            width,
+            height,
+            duration,
+            thumbnail_url: thumbnail_url.clone(),
+            size_formatted: format_size(meta.len()),
+        };
+
+        // Registrar en el video_map del pipeline para que pipeline_process
+        // pueda generar el thumbnail. Sin esto el worker busca el path en
+        // video_map, no lo encuentra, y sale silenciosamente → card sin thumb.
+        pipeline
+            .insert_video_meta(
+                file_path.clone(),
+                VideoMeta {
+                    id,
+                    mtime,
+                    thumbnail_url,
+                },
+            )
+            .await;
+
+        entries.push(entry);
+    }
+
+    Ok(entries)
 }
 
 // ── dialog:openFolder ─────────────────────────────────────────────────────────
@@ -426,10 +556,6 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 // ── video:getServerPort ───────────────────────────────────────────────────────
-// Permite que el frontend conozca el puerto del servidor HTTP de video en caso
-// de necesitarlo (por ejemplo para construir URLs de video manualmente).
-// En la práctica el backend ya construye las URLs y las devuelve en VideoEntry,
-// así que el frontend normalmente no necesita llamar a este command directamente.
 
 #[tauri::command]
 pub async fn get_video_server_port(server: State<'_, VideoServerState>) -> Result<u16, String> {

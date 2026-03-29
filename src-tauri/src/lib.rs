@@ -46,6 +46,7 @@ pub fn run() {
             commands::store_get_all,
             commands::store_get_folder_thumb,
             commands::fs_read_videos,
+            commands::fs_read_video_entries,
             commands::dialog_open_folder,
             commands::shell_show_in_folder,
             commands::shell_copy_path,
@@ -75,9 +76,8 @@ pub fn run() {
             // Arrancar el servidor HTTP de video en 127.0.0.1:{puerto_aleatorio}.
             // block_on aquí es seguro: estamos en setup, antes de que el runtime
             // de Tauri empiece a procesar eventos del frontend.
-            let server_state = tauri::async_runtime::block_on(async {
-                video_server::start_video_server().await
-            });
+            let server_state =
+                tauri::async_runtime::block_on(async { video_server::start_video_server().await });
 
             eprintln!("[setup] Video server port: {}", server_state.port());
             app.manage(server_state);
