@@ -1,6 +1,4 @@
-// commands.rs
-// All #[tauri::command] functions.
-// These replace every ipcMain.handle / ipcMain.on in the Electron main process.
+// All #[tauri::command] functions exposed to the frontend via IPC.
 
 use crate::pipeline::{
     thumb_url_for_path, video_url_for_path, PipelineHandle, VideoMeta, WorkerEvent,
@@ -16,8 +14,6 @@ use std::path::Path;
 use std::pin::Pin;
 use tauri::{AppHandle, Emitter, Runtime, State};
 
-// ── Video extensions whitelist ─────────────────────────────────────────────────
-
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "flv", "3gp", "ts", "mts",
 ];
@@ -26,14 +22,10 @@ fn is_video_ext(ext: &str) -> bool {
     VIDEO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
-// ── store:get ─────────────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn store_get(key: String, state: State<'_, AppStateHandle>) -> Result<Value, String> {
     Ok(state.get_key(&key).await)
 }
-
-// ── store:set ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn store_set(
@@ -45,8 +37,6 @@ pub async fn store_set(
     Ok(())
 }
 
-// ── store:getAll ──────────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn store_get_all(state: State<'_, AppStateHandle>) -> Result<Value, String> {
     let s = state
@@ -55,8 +45,8 @@ pub async fn store_get_all(state: State<'_, AppStateHandle>) -> Result<Value, St
     Ok(s)
 }
 
-// ── store:getFolderThumb ──────────────────────────────────────────────────────
-
+/// Returns a thumbnail URL for any video already in the dimensions cache for
+/// the given directory. Used to show a folder preview in the history list.
 #[tauri::command]
 pub async fn store_get_folder_thumb(
     dir_path: String,
@@ -112,8 +102,9 @@ pub enum ReadVideosResult {
     Videos(Vec<VideoEntry>),
 }
 
-// ── fs:readVideos ─────────────────────────────────────────────────────────────
-
+/// Full directory scan. Returns all videos sorted by mtime descending,
+/// enriched with any dims/thumbnails already in the cache. Also purges stale
+/// cache entries, arms the pipeline video_map, and starts the folder watcher.
 #[tauri::command]
 pub async fn fs_read_videos<R: Runtime>(
     app: AppHandle<R>,
@@ -146,7 +137,7 @@ pub async fn fs_read_videos<R: Runtime>(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Purge stale cache entries
+    // Remove cache entries for files that no longer exist on disk
     {
         let fresh_paths: std::collections::HashSet<_> =
             raw_videos.iter().map(|v| v.file_path.clone()).collect();
@@ -169,7 +160,7 @@ pub async fn fs_read_videos<R: Runtime>(
         }
     }
 
-    // Build initial response using cached dims (no ffprobe yet)
+    // Build initial response from cached dims — no ffprobe at this point
     let videos: Vec<VideoEntry> = state
         .read_dim_cache(|cache| {
             raw_videos
@@ -178,7 +169,7 @@ pub async fn fs_read_videos<R: Runtime>(
                     let dims = cache.get(&v.file_path);
                     if let Some(d) = dims {
                         if d.no_stream && (d.mtime - v.mtime).abs() < 1.0 {
-                            return None; // skip blank cards for known-bad files
+                            return None; // known-bad file — skip card entirely
                         }
                     }
                     let thumb_path = thumb_path_for_file(&v.file_path);
@@ -211,7 +202,6 @@ pub async fn fs_read_videos<R: Runtime>(
         })
         .await;
 
-    // Build video_map for the pipeline
     let video_map: HashMap<String, VideoMeta> = videos
         .iter()
         .map(|v| {
@@ -226,28 +216,22 @@ pub async fn fs_read_videos<R: Runtime>(
         })
         .collect();
 
-    // Arm the pipeline
     pipeline.set_video_map(video_map).await;
 
-    // Spawn workers if this is the first call (idempotent via OnceLock)
     spawn_workers_once(&app, state.inner().clone(), pipeline.inner().clone());
 
-    // Start folder watcher
     watcher::start(&app, dir_path.clone()).await;
 
     Ok(ReadVideosResult::Videos(videos))
 }
 
-// ── fs:readVideoEntries ───────────────────────────────────────────────────────
-// Command ligero usado por applyDiff en el renderer.
-// Recibe los paths específicos detectados por el watcher como nuevos y devuelve
-// su metadata lista para mostrar en la UI, sin hacer walk completo del
-// directorio, sin reiniciar el watcher y sin tocar el pipeline.
-//
-// Por qué existe: applyDiff antes llamaba fs_read_videos, que hace un walk
-// completo Y llama watcher::start (que internamente hace stop() → nuevo
-// watcher), introduciendo una ventana ciega donde se pierden eventos del OS.
-
+/// Lightweight command used by applyDiff in the renderer when the watcher
+/// detects new files. Returns metadata for specific paths without doing a full
+/// directory walk, without restarting the watcher, and without resetting the
+/// pipeline queue.
+///
+/// Calling fs_read_videos instead would restart the watcher (creating a blind
+/// window where OS events can be lost) and cancel all in-flight pipeline work.
 #[tauri::command]
 pub async fn fs_read_video_entries(
     file_paths: Vec<String>,
@@ -264,7 +248,6 @@ pub async fn fs_read_video_entries(
     for file_path in &file_paths {
         let path = Path::new(file_path);
 
-        // Stat del archivo — si no existe o no es accesible, se omite
         let meta = match tokio::fs::metadata(path).await {
             Ok(m) if m.is_file() => m,
             _ => continue,
@@ -300,9 +283,9 @@ pub async fn fs_read_video_entries(
 
         let id = video_id(file_path);
 
-        // Leer dims del cache si están disponibles. Para un archivo recién
-        // descargado normalmente no estarán aún — el pipeline las generará
-        // después de que applyDiff llame pipeline_process.
+        // Use cached dims if available. Newly downloaded files typically won't
+        // have an entry yet — the pipeline will generate one after applyDiff
+        // calls pipeline_process.
         let maybe_entry = state
             .read_dim_cache(|cache| {
                 let dims = cache.get(file_path.as_str());
@@ -313,7 +296,6 @@ pub async fn fs_read_video_entries(
                     None
                 };
                 if let Some(d) = dims {
-                    // Archivo conocido como sin stream válido con mismo mtime — omitir
                     if d.no_stream && (d.mtime - mtime).abs() < 1.0 {
                         return None;
                     }
@@ -326,7 +308,7 @@ pub async fn fs_read_video_entries(
 
         let (width, height, duration, thumbnail_url) = match maybe_entry {
             Some(t) => t,
-            None => continue, // known no_stream — skip
+            None => continue,
         };
 
         let entry = VideoEntry {
@@ -346,9 +328,9 @@ pub async fn fs_read_video_entries(
             size_formatted: format_size(meta.len()),
         };
 
-        // Registrar en el video_map del pipeline para que pipeline_process
-        // pueda generar el thumbnail. Sin esto el worker busca el path en
-        // video_map, no lo encuentra, y sale silenciosamente → card sin thumb.
+        // Register in the pipeline video_map so pipeline_process can generate
+        // the thumbnail. Without this the worker finds no entry for the path
+        // and exits silently, leaving the card without a thumbnail.
         pipeline
             .insert_video_meta(
                 file_path.clone(),
@@ -366,8 +348,6 @@ pub async fn fs_read_video_entries(
     Ok(entries)
 }
 
-// ── dialog:openFolder ─────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn dialog_open_folder<R: Runtime>(
     app: AppHandle<R>,
@@ -380,13 +360,10 @@ pub async fn dialog_open_folder<R: Runtime>(
         builder = builder.set_title(&t);
     }
     builder.pick_folder(move |path| {
-        // pick_folder returns Option<FilePath> — convert to Option<String>
         let _ = tx.send(path.map(|p| p.to_string()));
     });
     Ok(rx.await.map_err(|e| e.to_string())?)
 }
-
-// ── shell:showInFolder ────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn shell_show_in_folder<R: Runtime>(
@@ -428,8 +405,6 @@ pub async fn shell_show_in_folder<R: Runtime>(
     Ok(())
 }
 
-// ── shell:copyPath ────────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn shell_copy_path<R: Runtime>(
     app: AppHandle<R>,
@@ -442,16 +417,12 @@ pub async fn shell_copy_path<R: Runtime>(
     Ok(())
 }
 
-// ── pipeline:cancel ───────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn pipeline_cancel(pipeline: State<'_, PipelineHandle>) -> Result<(), String> {
     pipeline.cancel().await;
     watcher::stop().await;
     Ok(())
 }
-
-// ── pipeline:process ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn pipeline_process(
@@ -463,6 +434,11 @@ pub async fn pipeline_process(
     }
     pipeline.reprioritize(file_paths).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_video_server_port(server: State<'_, VideoServerState>) -> Result<u16, String> {
+    Ok(server.port())
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -484,7 +460,8 @@ fn video_id(file_path: &str) -> String {
     hex::encode(h.finalize())
 }
 
-// Async-recursive directory walk using Box::pin (no external crate needed)
+// Async-recursive directory walk. Uses Box::pin to avoid requiring an external
+// crate for async recursion.
 fn collect_videos<'a>(
     dir: &'a Path,
     out: &'a mut Vec<RawVideo>,
@@ -555,14 +532,7 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-// ── video:getServerPort ───────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn get_video_server_port(server: State<'_, VideoServerState>) -> Result<u16, String> {
-    Ok(server.port())
-}
-
-// ── Worker spawner (called once per app lifetime) ─────────────────────────────
+// ── Worker spawner ────────────────────────────────────────────────────────────
 
 use std::sync::OnceLock;
 static WORKERS_SPAWNED: OnceLock<()> = OnceLock::new();

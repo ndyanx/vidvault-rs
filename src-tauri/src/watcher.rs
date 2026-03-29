@@ -1,19 +1,17 @@
-// watcher.rs
-// Replaces Electron's poll-based folder watcher (setInterval every 30s).
-// Uses the `notify` crate for real filesystem events — no polling needed.
-// Emits "folder:changed" to the renderer with { added, removed } payload.
+// Filesystem watcher for the active video folder.
 //
-// FIXES vs previous version:
+// Uses the `notify` crate for real OS events instead of polling.
+// Emits "folder:changed" to the renderer with { added, removed } arrays.
 //
-// 1. Snapshot de archivos conocidos — igual que Electron's watchSnapshot.
-//    Al arrancar, se escanea el directorio y se guarda el conjunto de paths
-//    ya conocidos. Solo se emite "added" para paths que NO estaban en el
-//    snapshot. Los eventos Modify sobre archivos existentes se ignoran,
-//    evitando applyDiff innecesarios y la race condition de las dos cards.
-//
-// 2. Modify ignorado para archivos ya conocidos — un Modify de un video
-//    existente (antivirus, metadata, escritura parcial) ya no dispara
-//    folder:changed. Solo Create/Rename-to de archivos nuevos lo hace.
+// Key behaviors:
+// - An initial snapshot of known files is taken before the watcher attaches,
+//   so Modify events for pre-existing files are silently ignored.
+// - On Linux, inotify emits Modify(Name(To)) for rename-to; we treat paths
+//   absent from the snapshot as additions, same as Create.
+// - Rapid bursts (e.g. multi-file downloads) are coalesced with a 200 ms
+//   debounce before the event is forwarded to the renderer.
+// - A file appearing in both added and removed within the same burst is kept
+//   as added (file was modified, not truly removed).
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -41,9 +39,8 @@ fn is_video(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// Recorre el directorio de forma síncrona para construir el snapshot inicial.
-// Se llama una sola vez en start(), en un thread bloqueante, antes de que el
-// watcher empiece a recibir eventos.
+/// Synchronous recursive scan to build the initial snapshot of known files.
+/// Called in a blocking task before the watcher starts receiving events.
 fn collect_known(dir: &Path) -> HashSet<String> {
     let mut known = HashSet::new();
     collect_known_recursive(dir, &mut known);
@@ -72,7 +69,7 @@ fn collect_known_recursive(dir: &Path, out: &mut HashSet<String>) {
     }
 }
 
-// ── Global watcher handle (stop token) ───────────────────────────────────────
+// ── Global stop token ─────────────────────────────────────────────────────────
 
 type StopTx = oneshot::Sender<()>;
 static STOP: Mutex<Option<StopTx>> = Mutex::new(None);
@@ -94,19 +91,14 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
     tokio::spawn(async move {
         let dir = PathBuf::from(&dir_path);
 
-        // Build the initial snapshot of known video files BEFORE attaching the
-        // watcher. This way any Modify event for a pre-existing file is ignored.
-        // We do this in a blocking task so we don't block the tokio runtime.
         let dir_clone = dir.clone();
         let known_set = tokio::task::spawn_blocking(move || collect_known(&dir_clone))
             .await
             .unwrap_or_default();
 
-        // known is shared with the blocking thread via a Mutex.
         let known: std::sync::Arc<Mutex<HashSet<String>>> =
             std::sync::Arc::new(Mutex::new(known_set));
 
-        // Channel for raw notify events
         let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
         let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -124,12 +116,10 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
 
         eprintln!("[watcher] Watching {}", dir.display());
 
-        // Drain events in a blocking thread, forward to tokio via mpsc
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<(Vec<String>, Vec<String>)>(32);
 
         let known_thread = known.clone();
         std::thread::spawn(move || {
-            // Keep watcher alive in this thread
             let _watcher = watcher;
             for result in rx {
                 let event = match result {
@@ -147,15 +137,13 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
 
                     match event.kind {
                         EventKind::Create(_) => {
-                            // Always a new file (or rename-to on macOS/Windows).
-                            // Update snapshot so subsequent Modify events are ignored.
                             known_thread.lock().unwrap().insert(s.clone());
                             added.push(s);
                         }
                         EventKind::Modify(_) => {
-                            // Only emit as "added" if this path wasn't known before.
-                            // This handles rename-to on Linux (inotify emits Modify(Name(To)))
-                            // while ignoring writes to files already in the gallery.
+                            // On Linux, rename-to arrives as Modify(Name(To)).
+                            // Treat it as added only if the path wasn't in the
+                            // snapshot; otherwise it's a write to an existing file.
                             let is_new = {
                                 let mut k = known_thread.lock().unwrap();
                                 if k.contains(&s) {
@@ -183,7 +171,6 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
             }
         });
 
-        // Merge rapid bursts with a small debounce
         loop {
             tokio::select! {
                 _ = &mut stop_rx => {
@@ -191,7 +178,7 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
                     break;
                 }
                 Some((added, removed)) = async_rx.recv() => {
-                    // Drain any burst within 200ms
+                    // Coalesce burst events within 200 ms
                     let mut all_added = added;
                     let mut all_removed = removed;
                     loop {
@@ -203,10 +190,9 @@ pub async fn start<R: Runtime>(app: &AppHandle<R>, dir_path: String) {
                             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => break,
                         }
                     }
-                    // Deduplicate
                     let added_set: HashSet<_> = all_added.into_iter().collect();
                     let removed_set: HashSet<_> = all_removed.into_iter().collect();
-                    // If a file appears in both added + removed it was modified — keep as added
+                    // A path in both sets was modified in place — keep as added
                     let final_removed: Vec<_> = removed_set.difference(&added_set).cloned().collect();
                     let final_added: Vec<_> = added_set.into_iter().collect();
 

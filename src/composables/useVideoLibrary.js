@@ -1,4 +1,3 @@
-// useVideoLibrary.js — Tauri version
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -43,13 +42,10 @@ let unlistenNoStream = null;
 let unlistenFolderChanged = null;
 let initPromise = null;
 
-// FIX: guard contra applyDiff concurrentes.
-// Si llegan dos folder:changed antes de que el primero resuelva el invoke,
-// ambos calculaban existingIds sobre el mismo videos.value (aún sin el nuevo
-// video) y ambos pasaban el filtro → dos cards del mismo archivo con tamaños
-// distintos (el archivo crecía entre las dos llamadas).
-// La promise actúa como mutex: el segundo applyDiff espera al primero y al
-// resolverse ya ve el id en existingIds → no duplica la card.
+// Serializes concurrent applyDiff calls so that existingIds is always
+// computed against an already-updated videos array. Without this, two
+// folder:changed events arriving before the first invoke resolves both see
+// the same videos list and can insert duplicate cards.
 let applyDiffPromise = Promise.resolve();
 
 async function ensureListeners() {
@@ -104,12 +100,6 @@ export function useVideoLibrary() {
     currentFolder.value ? folderNameFrom(currentFolder.value) : null,
   );
 
-  // FIX: applyDiff serializada mediante promise-chain.
-  // Cada invocación se encola detrás de la anterior, de modo que existingIds
-  // siempre se calcula sobre un videos.value ya actualizado por la llamada previa.
-  // Además ya no llama fs_read_videos (que internamente reiniciaba el watcher):
-  // en su lugar usa el nuevo command fs_read_video_entries que solo devuelve
-  // la metadata de los paths específicos sin tocar el watcher ni el pipeline.
   function applyDiff(addedPaths) {
     applyDiffPromise = applyDiffPromise.then(() => _applyDiffOnce(addedPaths));
   }
@@ -117,8 +107,6 @@ export function useVideoLibrary() {
   async function _applyDiffOnce(addedPaths) {
     if (!addedPaths.length || !currentFolder.value) return;
 
-    // Pedir solo la metadata de los paths nuevos, sin reiniciar el watcher.
-    // fs_read_video_entries es un command ligero que no llama watcher::start.
     let entries;
     try {
       entries = await invoke("fs_read_video_entries", {
@@ -146,7 +134,6 @@ export function useVideoLibrary() {
   async function loadFolder(folderPath) {
     if (!folderPath) return;
 
-    // Cancelar pipeline anterior
     await invoke("pipeline_cancel");
 
     isLoading.value = true;
@@ -154,7 +141,8 @@ export function useVideoLibrary() {
     videos.value = [];
     currentFolder.value = folderPath;
 
-    // Resetear la cola de applyDiff al cambiar de carpeta
+    // Reset the applyDiff queue so stale callbacks from the previous folder
+    // don't run against the new one.
     applyDiffPromise = Promise.resolve();
 
     await ensureListeners();
@@ -185,6 +173,7 @@ export function useVideoLibrary() {
         sizeFormatted: formatSize(v.size),
       }));
 
+      // Seed the pipeline with the first 20 videos (likely visible on load)
       const seedPaths = result.slice(0, 20).map((v) => v.filePath);
       if (seedPaths.length) {
         invoke("pipeline_process", { filePaths: seedPaths }).catch(

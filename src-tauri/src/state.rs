@@ -1,7 +1,3 @@
-// state.rs
-// Replaces Electron's getState/loadState/saveState + loadCache/saveCache
-// and the thumbnail bucketing logic (thumbPathForFile, migrateFlatThumbnails)
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::{Digest, Sha1};
@@ -12,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell as AsyncOnceCell, RwLock};
 use tokio::time::sleep;
 
-// ── App state shape ──────────────────────────────────────────────────────────
+// ── Persisted state shape ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +45,7 @@ impl Default for AppState {
     }
 }
 
-// ── Dimensions cache entry ────────────────────────────────────────────────────
+// ── Dimensions cache ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,17 +57,17 @@ pub struct DimEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
     pub mtime: f64,
+    // true when ffprobe found no valid video stream — card is hidden
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_stream: bool,
 }
 
 pub type DimCache = HashMap<String, DimEntry>;
 
-// ── Path helpers ─────────────────────────────────────────────────────────────
+// ── Path helpers ──────────────────────────────────────────────────────────────
 
 fn user_data_dir() -> PathBuf {
-    // $HOME/.local/share/vidvault on Linux, ~/Library/Application Support/vidvault on macOS,
-    // %APPDATA%\vidvault on Windows
+    // ~/.local/share/vidvault  |  ~/Library/Application Support/vidvault  |  %APPDATA%\vidvault
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("vidvault")
@@ -89,7 +85,7 @@ pub fn thumbnail_dir() -> PathBuf {
     user_data_dir().join("thumbnails")
 }
 
-/// Bucketed thumbnail path: thumbnails/{xx}/{yy}/{sha1}.jpg
+/// Returns the bucketed thumbnail path for a video file: thumbnails/{xx}/{yy}/{sha1}.jpg
 pub fn thumb_path_for_file(file_path: &str) -> PathBuf {
     let mut hasher = Sha1::new();
     hasher.update(file_path.as_bytes());
@@ -103,7 +99,9 @@ pub fn thumb_path_for_file(file_path: &str) -> PathBuf {
 }
 
 // ── AppStateHandle ────────────────────────────────────────────────────────────
-// Thread-safe singleton wrapping AppState + DimCache, with debounced writes.
+//
+// Thread-safe handle wrapping AppState + DimCache. Writes are debounced 300 ms
+// to avoid hammering disk on rapid successive updates (e.g. scrolling).
 
 #[derive(Clone)]
 pub struct AppStateHandle(Arc<Inner>);
@@ -111,7 +109,6 @@ pub struct AppStateHandle(Arc<Inner>);
 struct Inner {
     state: AsyncOnceCell<RwLock<AppState>>,
     dim_cache: AsyncOnceCell<RwLock<DimCache>>,
-    // pending write flags, guarded by their own mutexes
     state_dirty: Mutex<bool>,
     cache_dirty: Mutex<bool>,
 }
@@ -163,7 +160,6 @@ impl AppStateHandle {
         self.schedule_state_write();
     }
 
-    /// Get a single JSON-compatible key from AppState (mirrors store:get IPC)
     pub async fn get_key(&self, key: &str) -> Value {
         let lock = self.get_state().await;
         let s = lock.read().await;
@@ -171,7 +167,6 @@ impl AppStateHandle {
         v.get(key).cloned().unwrap_or(Value::Null)
     }
 
-    /// Set a single key in AppState (mirrors store:set IPC)
     pub async fn set_key(&self, key: &str, value: Value) {
         {
             let lock = self.get_state().await;
@@ -193,7 +188,7 @@ impl AppStateHandle {
             {
                 let mut dirty = inner.state_dirty.lock().await;
                 if *dirty {
-                    return; // already pending
+                    return;
                 }
                 *dirty = true;
             }
@@ -281,7 +276,7 @@ impl AppStateHandle {
     }
 }
 
-// ── JSON I/O helpers ──────────────────────────────────────────────────────────
+// ── JSON I/O ──────────────────────────────────────────────────────────────────
 
 async fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     let raw = tokio::fs::read_to_string(path).await.ok()?;

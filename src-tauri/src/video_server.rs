@@ -1,24 +1,15 @@
-// video_server.rs
-// Servidor HTTP real con axum escuchando en 127.0.0.1 en un puerto aleatorio.
+// HTTP server (axum) for video streaming.
 //
-// Por qué existe este archivo:
-//   El protocolo custom localvideo:// pasa por wry/WebView y tiene una limitación
-//   conocida (wry#1404): no soporta streaming real. El WebView carga el archivo
-//   completo en memoria antes de reproducirlo, lo que rompe seek y hace que
-//   archivos grandes nunca terminen de cargar.
+// The custom localvideo:// protocol passes through wry/WebView, which buffers
+// the entire file before playback (wry#1404). That breaks seeking and makes
+// large files stall indefinitely.
 //
-//   La solución es levantar un servidor HTTP TCP normal. El <video> del frontend
-//   apunta a http://127.0.0.1:{puerto}/... — una conexión TCP estándar que axum
-//   sirve con range requests reales, igual que cualquier servidor web. wry no
-//   interviene en absoluto.
+// This server listens on 127.0.0.1 with a random OS-assigned port. The
+// frontend's <video> element points to http://127.0.0.1:{port}/..., bypassing
+// wry entirely and getting real HTTP range-request support.
 //
-// Flujo:
-//   1. En setup, llamamos start_video_server() → vincula en puerto aleatorio
-//   2. El puerto se guarda en VideoServerState (managed por Tauri)
-//   3. El command get_video_server_port lo expone al backend (pipeline/commands)
-//   4. video_url_for_path() construye http://127.0.0.1:{puerto}/...
-//   5. thumb_url_for_path() sigue usando localvideo:// (thumbnails son pequeños,
-//      no necesitan streaming)
+// Thumbnails (small JPEGs) still use localvideo:// since they don't need
+// streaming and are loaded in a single read.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -30,10 +21,6 @@ use std::sync::Arc;
 use tokio::io::AsyncSeekExt;
 use tokio::net::TcpListener;
 
-// ── Estado compartido del servidor ───────────────────────────────────────────
-
-/// El puerto en el que está escuchando el servidor. Se almacena en Tauri state
-/// para que commands.rs y pipeline.rs puedan construir URLs sin IPC adicional.
 #[derive(Clone)]
 pub struct VideoServerState(Arc<u16>);
 
@@ -43,22 +30,19 @@ impl VideoServerState {
     }
 }
 
-// ── Arranque ──────────────────────────────────────────────────────────────────
-
-/// Vincula el servidor en 127.0.0.1:0 (puerto aleatorio asignado por el OS),
-/// lo lanza en background y devuelve el estado con el puerto real.
+/// Binds on 127.0.0.1:0 (OS picks the port), launches the server in the
+/// background, and returns the state holding the actual port number.
 pub async fn start_video_server() -> VideoServerState {
-    // Puerto 0 → el OS elige un puerto libre automáticamente
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("[video_server] No se pudo vincular en 127.0.0.1:0");
+        .expect("[video_server] failed to bind on 127.0.0.1:0");
 
     let port = listener
         .local_addr()
-        .expect("[video_server] local_addr falló")
+        .expect("[video_server] local_addr failed")
         .port();
 
-    eprintln!("[video_server] Escuchando en 127.0.0.1:{}", port);
+    eprintln!("[video_server] listening on 127.0.0.1:{}", port);
 
     let state = VideoServerState(Arc::new(port));
 
@@ -69,28 +53,20 @@ pub async fn start_video_server() -> VideoServerState {
     tokio::spawn(async move {
         axum::serve(listener, app)
             .await
-            .expect("[video_server] axum::serve falló");
+            .expect("[video_server] axum::serve failed");
     });
 
     state
 }
 
-// ── Handler principal ─────────────────────────────────────────────────────────
-
 async fn serve_file(State(_state): State<VideoServerState>, req: Request<Body>) -> Response<Body> {
-    // La URL llega como /{file_path_encoded}
-    // En macOS/Linux: /home/user/videos/pelicula.mp4
-    // En Windows:     /C:/Users/user/Videos/pelicula.mp4  (con slash inicial extra)
+    // URL arrives as /{encoded_file_path}
+    // macOS/Linux: /home/user/videos/file.mp4
+    // Windows:     /C:/Users/user/Videos/file.mp4  (leading slash from HTTP path)
     let raw_path = req.uri().path();
-
-    // Quitar el slash inicial
     let stripped = raw_path.strip_prefix('/').unwrap_or(raw_path);
-
-    // Decodificar percent-encoding
     let decoded = percent_decode(stripped);
 
-    // En Windows la ruta llega como "C:/..." — está bien. En Unix como "/home/..." —
-    // al quitar el slash inicial queda "home/...", hay que reponerlo.
     #[cfg(not(target_os = "windows"))]
     let file_path = format!("/{}", decoded);
     #[cfg(target_os = "windows")]
@@ -101,7 +77,7 @@ async fn serve_file(State(_state): State<VideoServerState>, req: Request<Body>) 
     match serve_with_range(&file_path, req.headers()).await {
         Ok(resp) => resp,
         Err(status) => {
-            eprintln!("[video_server] error {} para '{}'", status, file_path);
+            eprintln!("[video_server] error {} for '{}'", status, file_path);
             Response::builder()
                 .status(status)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -110,8 +86,6 @@ async fn serve_file(State(_state): State<VideoServerState>, req: Request<Body>) 
         }
     }
 }
-
-// ── Lógica de range requests ──────────────────────────────────────────────────
 
 async fn serve_with_range(
     file_path: &str,
@@ -123,7 +97,7 @@ async fn serve_with_range(
     let file_size = meta.len();
     let mime = mime_for_path(file_path);
 
-    // ETag: tamaño + mtime — permite 304 sin leer el archivo
+    // ETag: size + mtime, lets the client validate without re-reading the file
     let mtime_secs = meta
         .modified()
         .ok()
@@ -132,7 +106,6 @@ async fn serve_with_range(
         .unwrap_or(0);
     let etag = format!("\"{}-{}\"", file_size, mtime_secs);
 
-    // If-None-Match → 304
     if let Some(client_etag) = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -226,7 +199,6 @@ async fn serve_range(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Leer solo el chunk pedido — streaming real sin cargar el archivo completo
     let limited = tokio::io::AsyncReadExt::take(file, chunk_len);
     let stream = tokio_util::io::ReaderStream::new(limited);
     let body = Body::from_stream(stream);
@@ -246,8 +218,6 @@ async fn serve_range(
         .body(body)
         .unwrap())
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn mime_for_path(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();

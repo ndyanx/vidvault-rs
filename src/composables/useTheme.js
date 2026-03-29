@@ -1,4 +1,3 @@
-// useTheme.js — Tauri version
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -14,6 +13,7 @@ function applyTheme(dark) {
   document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
 }
 
+// Apply before the persisted value loads to avoid a flash on startup
 applyTheme(isDark.value);
 
 invoke("store_get", { key: "theme" })

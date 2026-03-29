@@ -1,22 +1,14 @@
-// video_protocol.rs
-// Serves local video and JPEG thumbnail files with HTTP range support.
+// Handles localvideo:// requests for thumbnail images.
 //
-// Diferencias vs Electron:
-// - En Electron, protocol.registerFileProtocol maneja range requests automáticamente.
-// - En Tauri debemos implementarlo manualmente.
-// - WebView2 (Windows) reescribe localvideo://local/path → https://localvideo.localhost/path
-//   por eso manejamos ambos prefijos.
-// - El header Access-Control-Allow-Origin es necesario para que <video> pueda
-//   hacer range requests cross-origin en WebView2 (el origen del renderer es
-//   http://localhost:1420 en dev y tauri://localhost en producción).
+// WebView2 (Windows) rewrites localvideo://local/path to
+// https://localvideo.localhost/path, so both URI forms are accepted.
 //
-// Mejoras sobre la versión anterior:
-// - ETag basado en file_size + mtime: permite al WebView saber si el archivo
-//   cambió sin re-leerlo. Si el modal se cierra y se vuelve a abrir el mismo
-//   video, el WebView manda If-None-Match y respondemos 304 — cero I/O.
-// - Cache-Control "no-cache" en lugar de "no-store" para video: "no-store"
-//   impide que el WebView guarde cualquier byte en memoria entre requests.
-//   "no-cache" permite que reutilice lo que ya tiene, solo revalidando con ETag.
+// Cache strategy:
+//   - Thumbnails: Cache-Control: max-age=86400, immutable — they're written
+//     once and never change.
+//   - Videos (if served through this protocol): no-cache with ETag, allowing
+//     the WebView to reuse a cached response after revalidation instead of
+//     discarding it and reissuing the full range-request sequence.
 
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::UriSchemeResponder;
@@ -30,8 +22,8 @@ pub async fn handle(request: Request<Vec<u8>>, responder: UriSchemeResponder) {
         eprintln!("[protocol] error status: {}", status);
         Response::builder()
             .status(status)
-            // FIX: incluir CORS header incluso en respuestas de error,
-            // de lo contrario WebView2 puede silenciar el error en la consola.
+            // Include CORS header on error responses too; WebView2 may
+            // otherwise silently suppress the error in the console.
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .body(
                 status
@@ -50,10 +42,7 @@ pub async fn handle(request: Request<Vec<u8>>, responder: UriSchemeResponder) {
 async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCode> {
     let uri_str = request.uri().to_string();
 
-    // Tauri v2 / WebView2 en Windows puede entregar la URI en varias formas:
-    //   localvideo://local/C:%5Cpath%5Cfile.mp4  (original, macOS/Linux)
-    //   https://localvideo.localhost/C:%5Cpath%5Cfile.mp4  (WebView2 proxy)
-    //   localvideo://localhost/...  (variante alternativa)
+    // Accept all URI forms emitted by different WebView backends
     let encoded_path = if let Some(p) = uri_str.strip_prefix("localvideo://local/") {
         p.to_owned()
     } else if let Some(p) = uri_str.strip_prefix("https://localvideo.localhost/") {
@@ -68,9 +57,9 @@ async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCod
     };
 
     let decoded = percent_decode(&encoded_path);
-    // En Windows, las rutas absolutas llegan como "/C:/Users/..." por la forma en que
-    // WebView2 construye la URL http://localvideo.localhost/C:/... → path = "/C:/..."
-    // Hay que quitar ese primer slash para que sea una ruta válida de Windows.
+
+    // WebView2 produces http://localvideo.localhost/C:/... where the path
+    // component starts with /C:/. Strip the leading slash for Windows paths.
     #[cfg(target_os = "windows")]
     let file_path = if decoded.starts_with('/') {
         decoded[1..].to_string()
@@ -79,6 +68,7 @@ async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCod
     };
     #[cfg(not(target_os = "windows"))]
     let file_path = decoded;
+
     eprintln!("[protocol] decoded file path: {}", file_path);
 
     let meta = tokio::fs::metadata(&file_path).await.map_err(|e| {
@@ -90,14 +80,8 @@ async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCod
     let mime = mime_for_path(&file_path);
     eprintln!("[protocol] file_size={} mime={}", file_size, mime);
 
-    // ── ETag ─────────────────────────────────────────────────────────────────
-    // Construimos el ETag combinando tamaño + mtime del archivo.
-    // Esto identifica unívocamente el contenido sin leer el archivo:
-    // - Si el video no cambió → mismo ETag → el WebView puede reusar lo que tiene
-    // - Si el video fue reemplazado → mtime distinto → ETag distinto → re-fetch
-    //
-    // Solo aplica a video. Las imágenes (thumbnails) usan max-age=86400 immutable
-    // y no necesitan revalidación.
+    // ETag for video files: identifies content by size + mtime without reading
+    // the file. Allows 304 responses when the same video is reopened.
     let etag = if !mime.starts_with("image/") {
         let mtime_secs = meta
             .modified()
@@ -110,14 +94,6 @@ async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCod
         None
     };
 
-    // ── If-None-Match → 304 Not Modified ─────────────────────────────────────
-    // El WebView manda If-None-Match cuando ya tiene una respuesta cacheada para
-    // esta URL. Si el ETag coincide, respondemos 304 sin cuerpo: el WebView
-    // reutiliza lo que tiene en memoria. Esto ocurre típicamente cuando:
-    //   1. El usuario abre el modal de un video → el WebView hace varios range requests
-    //   2. Cierra el modal
-    //   3. Vuelve a abrir el mismo video → manda If-None-Match con el ETag anterior
-    // En ese tercer paso, el video arranca casi instantáneo porque no hay I/O de disco.
     if let Some(ref etag_val) = etag {
         let client_etag = request
             .headers()
@@ -136,7 +112,6 @@ async fn serve(request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, StatusCod
         }
     }
 
-    // ── Dispatch a range o full ───────────────────────────────────────────────
     let range_header = request
         .headers()
         .get(header::RANGE)
@@ -162,10 +137,9 @@ async fn serve_full(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Para imágenes (thumbnails): cache agresivo — son inmutables una vez generadas.
-    // Para video: "no-cache" (no "no-store") — permite que el WebView guarde el
-    // contenido en memoria y lo reutilice revalidando con ETag, en lugar de
-    // descartar todo y repetir el ciclo completo de range requests desde cero.
+    // Thumbnails are immutable once generated; use an aggressive cache.
+    // Video files use no-cache + ETag so the WebView can revalidate rather
+    // than discard and re-fetch.
     let cache_control = if mime.starts_with("image/") {
         "public, max-age=86400, immutable"
     } else {
@@ -239,9 +213,9 @@ async fn serve_range(
     let mut builder = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, mime)
-        // FIX: Content-Length debe ser el tamaño del chunk, no el archivo completo.
-        // Algunos WebViews usan Content-Length para saber cuándo termina el chunk
-        // y si está mal pueden dejar el <video> en estado de carga infinita.
+        // Content-Length must reflect the chunk size, not the total file size.
+        // Some WebViews use this to determine when the chunk ends; a wrong value
+        // can leave the <video> element stuck in a loading state.
         .header(header::CONTENT_LENGTH, chunk_size)
         .header(
             header::CONTENT_RANGE,

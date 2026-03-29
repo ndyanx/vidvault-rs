@@ -1,6 +1,3 @@
-// src-tauri/src/lib.rs
-// VidVault — Tauri 2 backend
-
 pub mod commands;
 pub mod pipeline;
 pub mod state;
@@ -18,7 +15,6 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 pub fn run() {
     tauri::Builder::default()
-        // ── Plugins ───────────────────────────────────────────────────────────
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -28,18 +24,15 @@ pub fn run() {
                 let _ = win.set_focus();
             }
         }))
-        // ── Custom protocol: localvideo:// ─────────────────────────────────
-        // Solo se usa para thumbnails (imágenes pequeñas). Los videos se sirven
-        // por el servidor HTTP de axum en 127.0.0.1 para tener streaming real.
+        // localvideo:// is used only for thumbnails (small JPEGs). Videos are
+        // served by the axum HTTP server to get real range-request streaming.
         .register_asynchronous_uri_scheme_protocol("localvideo", |_app, request, responder| {
             tauri::async_runtime::spawn(async move {
                 video_protocol::handle(request, responder).await;
             });
         })
-        // ── App state ─────────────────────────────────────────────────────────
         .manage(state::AppStateHandle::new())
         .manage(pipeline::PipelineHandle::new())
-        // ── IPC commands ──────────────────────────────────────────────────────
         .invoke_handler(tauri::generate_handler![
             commands::store_get,
             commands::store_set,
@@ -58,24 +51,20 @@ pub fn run() {
             let win = app.get_webview_window("main").unwrap();
 
             #[cfg(target_os = "windows")]
-            apply_acrylic(&win, Some((18, 18, 18, 125))).ok(); // dark tint opcional
+            apply_acrylic(&win, Some((18, 18, 18, 125))).ok();
 
             #[cfg(target_os = "macos")]
             apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, None).ok();
 
-            // FIX: Cargar el estado de forma bloqueante antes de que el frontend
-            // pueda hacer su primer invoke('store_get_all').
-            // Sin esto, si el frontend llama store_get_all() antes de que el spawn
-            // de load() termine, OnceCell se inicializa con el default vacío y el
-            // historial de carpetas/lastFolder se pierden en arranques rápidos.
+            // Load persisted state synchronously before the frontend can invoke
+            // store_get_all. Without this, a fast startup could race the async
+            // load and initialize the OnceCell with an empty default, losing
+            // folder history and lastFolder.
             let state = app.state::<state::AppStateHandle>().inner().clone();
             tauri::async_runtime::block_on(async move {
                 state.load().await;
             });
 
-            // Arrancar el servidor HTTP de video en 127.0.0.1:{puerto_aleatorio}.
-            // block_on aquí es seguro: estamos en setup, antes de que el runtime
-            // de Tauri empiece a procesar eventos del frontend.
             let server_state =
                 tauri::async_runtime::block_on(async { video_server::start_video_server().await });
 

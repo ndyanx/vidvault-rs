@@ -1,4 +1,3 @@
-// useFavorites.js — Tauri version
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 

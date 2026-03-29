@@ -1,4 +1,3 @@
-// useLocale.js — Tauri version
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
