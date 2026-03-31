@@ -268,7 +268,6 @@ export function useVideoLibrary() {
     isInitializing,
     error,
     isEmpty,
-    isElectron: false,
     openFolderDialog,
     loadFolder,
     closeFolder,

@@ -32,5 +32,5 @@ export function useFavorites() {
     await invoke("store_set", { key: "favorites", value: [...next] });
   };
 
-  return { favSet, isFavorite, toggle };
+  return { isFavorite, toggle };
 }

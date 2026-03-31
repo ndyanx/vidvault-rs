@@ -7,12 +7,6 @@ pub mod watcher;
 
 use tauri::Manager;
 
-#[cfg(target_os = "windows")]
-use window_vibrancy::apply_acrylic;
-
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -48,14 +42,6 @@ pub fn run() {
             commands::get_video_server_port,
         ])
         .setup(|app| {
-            let win = app.get_webview_window("main").unwrap();
-
-            #[cfg(target_os = "windows")]
-            apply_acrylic(&win, Some((18, 18, 18, 125))).ok();
-
-            #[cfg(target_os = "macos")]
-            apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, None).ok();
-
             // Load persisted state synchronously before the frontend can invoke
             // store_get_all. Without this, a fast startup could race the async
             // load and initialize the OnceCell with an empty default, losing

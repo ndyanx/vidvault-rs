@@ -38,7 +38,7 @@ let pendingMetadataListener = null;
 
 function onCardEnter(event, video) {
     if (!video.videoUrl || !video.duration) return;
-    onCardLeave(); // limpiar cualquier preview anterior
+    onCardLeave(); // clear any previous preview
     hoveredId.value = video.id;
     const el = event.currentTarget.querySelector(".card-hover-video");
     if (!el) return;
@@ -50,7 +50,7 @@ function onCardEnter(event, video) {
     const step = Math.max(video.duration / 12, 1);
     const startSeeking = () => {
         pendingMetadataListener = null;
-        if (activeVideoEl !== el) return; // el usuario ya salió antes de que cargara
+        if (activeVideoEl !== el) return; // user already left before metadata loaded
         el.currentTime = t;
         seekInterval = setInterval(() => {
             t = (t + step) % video.duration;
@@ -550,8 +550,8 @@ onUnmounted(() => {
                         </div>
                     </Transition>
 
-                    <!-- Hover seek preview — siempre en el DOM para que querySelector
-                         lo encuentre de inmediato sin esperar un tick de Vue -->
+                    <!-- Hover seek preview — always in the DOM so querySelector finds it
+                         immediately without waiting for a Vue tick -->
                     <video
                         v-if="item.video.videoUrl"
                         class="card-hover-video"

@@ -25,5 +25,10 @@
     "security": {
       "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: http://asset.localhost localvideo: http://localvideo.localhost https://localvideo.localhost blob: data:; media-src 'self' asset: http://asset.localhost localvideo: http://localvideo.localhost https://localvideo.localhost http://127.0.0.1:* blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico"]
   }
 }

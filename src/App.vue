@@ -79,7 +79,7 @@ onMounted(async () => {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: transparent; /* don't block native acrylic/vibrancy effect */
+    background: transparent;
     overflow: hidden;
 }
 

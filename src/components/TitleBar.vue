@@ -290,13 +290,13 @@ function relativeTime(ts) {
                 }}</span>
             </button>
 
-            <!-- Window controls — solo en Windows -->
+            <!-- Window controls — Windows only -->
             <div v-if="!isMac" class="win-controls">
                 <button
                     class="win-btn"
                     @click="appWindow.minimize()"
-                    title="Minimizar"
-                    aria-label="Minimizar"
+                    title="Minimize"
+                    aria-label="Minimize"
                 >
                     <svg
                         width="11"
@@ -311,8 +311,8 @@ function relativeTime(ts) {
                 <button
                     class="win-btn"
                     @click="appWindow.toggleMaximize()"
-                    title="Maximizar"
-                    aria-label="Maximizar"
+                    title="Maximize"
+                    aria-label="Maximize"
                 >
                     <svg
                         width="11"
@@ -329,8 +329,8 @@ function relativeTime(ts) {
                 <button
                     class="win-btn win-btn-close"
                     @click="appWindow.close()"
-                    title="Cerrar"
-                    aria-label="Cerrar"
+                    title="Close"
+                    aria-label="Close"
                 >
                     <svg
                         width="11"
@@ -784,7 +784,7 @@ input {
     display: flex;
     align-items: stretch;
     height: 100%;
-    /* Posición fija a la derecha, superpuesto al padding reservado */
+    /* Fixed to the right, overlapping the reserved padding */
     position: absolute;
     right: 0;
     top: 0;
