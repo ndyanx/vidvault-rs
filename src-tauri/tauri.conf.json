@@ -19,6 +19,7 @@
         "minHeight": 500,
         "decorations": false,
         "transparent": false,
+        "visible": false,
         "additionalBrowserArgs": "--allow-running-insecure-content --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1"
       }
     ],

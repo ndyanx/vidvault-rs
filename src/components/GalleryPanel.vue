@@ -17,6 +17,7 @@ const {
     loadFolder,
     showInFolder,
     copyPath,
+    store,
 } = useVideoLibrary();
 const { isFavorite, toggle: toggleFavorite } = useFavorites();
 
@@ -29,6 +30,14 @@ const DEFAULT_RATIO = 9 / 16;
 const searchQuery = ref("");
 const showFavoritesOnly = ref(false);
 const sortBy = ref("date"); // 'date' | 'name' | 'size' | 'duration'
+
+// Cargar sortBy persistido y guardar cambios futuros
+store.get("sortBy").then((val) => {
+    if (val && ["date", "name", "size", "duration"].includes(val)) {
+        sortBy.value = val;
+    }
+});
+watch(sortBy, (val) => store.set("sortBy", val));
 
 // --- Hover preview ---
 const hoveredId = ref(null);

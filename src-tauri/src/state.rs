@@ -31,6 +31,8 @@ pub struct AppState {
     pub theme: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
+    #[serde(default)]
+    pub sort_by: Option<String>,
 }
 
 impl Default for AppState {
@@ -41,6 +43,7 @@ impl Default for AppState {
             favorites: vec![],
             theme: None,
             locale: None,
+            sort_by: None,
         }
     }
 }

@@ -3,6 +3,7 @@ import { ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
 import { formatSize, formatDuration } from "../utils/format.js";
+import { applyVolumeToEl, syncVolumeFromEl } from "../composables/useVolume.js";
 
 const { t } = useI18n();
 
@@ -23,10 +24,13 @@ watch(
         if (videoRef.value && !videoRef.value.paused) {
             videoRef.value.pause();
         }
-        if (newVideo && videoRef.value) {
+        if (newVideo) {
             await nextTick();
-            videoRef.value.load();
-            videoRef.value.play().catch(() => {});
+            if (videoRef.value) {
+                applyVolumeToEl(videoRef.value);
+                videoRef.value.load();
+                videoRef.value.play().catch(() => {});
+            }
         }
     },
 );
@@ -41,7 +45,11 @@ function handleKey(e) {
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") emit("prev");
 }
 
-onMounted(() => document.addEventListener("keydown", handleKey));
+onMounted(() => {
+    document.addEventListener("keydown", handleKey);
+    // Si el video ya está montado (video prop ya presente), aplicar volumen
+    if (videoRef.value) applyVolumeToEl(videoRef.value);
+});
 onUnmounted(() => document.removeEventListener("keydown", handleKey));
 
 async function copyPath() {
@@ -209,6 +217,7 @@ function showInFolder() {
                                 autoplay
                                 loop
                                 class="modal-video"
+                                @volumechange="syncVolumeFromEl(videoRef)"
                             />
                         </div>
 

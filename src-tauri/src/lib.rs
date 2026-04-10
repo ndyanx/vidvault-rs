@@ -9,6 +9,7 @@ use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -56,6 +57,12 @@ pub fn run() {
 
             eprintln!("[setup] Video server port: {}", server_state.port());
             app.manage(server_state);
+
+            // Show the window after window-state has restored its size/position,
+            // preventing the brief flash of the default 1280x800 size.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
 
             Ok(())
         })
