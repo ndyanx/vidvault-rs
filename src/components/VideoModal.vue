@@ -47,7 +47,7 @@ function handleKey(e) {
 
 onMounted(() => {
     document.addEventListener("keydown", handleKey);
-    // Si el video ya está montado (video prop ya presente), aplicar volumen
+    // If the video element is already mounted (video prop already present), apply volume
     if (videoRef.value) applyVolumeToEl(videoRef.value);
 });
 onUnmounted(() => document.removeEventListener("keydown", handleKey));
