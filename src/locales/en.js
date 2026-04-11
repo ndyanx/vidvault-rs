@@ -51,6 +51,8 @@ export default {
     showInFolder: "Show in folder",
     copyPath: "Copy path",
     clearSearch: "Clear search",
+    hoverPreview: "Preview",
+    hoverPreviewToggle: "Toggle hover preview",
   },
 
   // VideoModal

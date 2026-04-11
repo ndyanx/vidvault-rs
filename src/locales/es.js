@@ -52,6 +52,8 @@ export default {
     showInFolder: "Mostrar en carpeta",
     copyPath: "Copiar ruta",
     clearSearch: "Limpiar búsqueda",
+    hoverPreview: "Vista previa",
+    hoverPreviewToggle: "Activar/desactivar vista previa al pasar el cursor",
   },
 
   // VideoModal

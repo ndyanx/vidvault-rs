@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useVideoLibrary } from "../composables/useVideoLibrary.js";
 import { useFavorites } from "../composables/useFavorites.js";
+import { useVirtualMasonry } from "../composables/useVirtualMasonry.js";
 import { formatDuration } from "../utils/format.js";
 import VideoSkeleton from "./VideoSkeleton.vue";
 import VideoModal from "./VideoModal.vue";
@@ -21,17 +22,13 @@ const {
 } = useVideoLibrary();
 const { isFavorite, toggle: toggleFavorite } = useFavorites();
 
-const GAP = 10;
-const VIEWPORT_MARGIN = 400; // px of extra rendering margin (virtual scroll)
-const PROCESS_LOOKAHEAD = 800; // px below viewport to pre-process (1 extra screen approx)
-const IDLE_DELAY = 20_000; // ms of inactivity before background idle processing kicks in
 const DEFAULT_RATIO = 9 / 16;
 
 const searchQuery = ref("");
 const showFavoritesOnly = ref(false);
-const sortBy = ref("date"); // 'date' | 'name' | 'size' | 'duration'
+const sortBy = ref("date");
+const hoverPreviewEnabled = ref(false);
 
-// Cargar sortBy persistido y guardar cambios futuros
 store.get("sortBy").then((val) => {
     if (val && ["date", "name", "size", "duration"].includes(val)) {
         sortBy.value = val;
@@ -39,31 +36,35 @@ store.get("sortBy").then((val) => {
 });
 watch(sortBy, (val) => store.set("sortBy", val));
 
+store.get("hoverPreviewEnabled").then((val) => {
+    if (val !== null && val !== undefined) hoverPreviewEnabled.value = !!val;
+});
+watch(hoverPreviewEnabled, (val) => store.set("hoverPreviewEnabled", val));
+
 // --- Hover preview ---
-const hoveredId = ref(null);
 let seekInterval = null;
 let activeVideoEl = null;
 let pendingMetadataListener = null;
 
 function onCardEnter(event, video) {
-    if (!video.videoUrl || !video.duration) return;
-    onCardLeave(); // clear any previous preview
-    hoveredId.value = video.id;
+    if (!hoverPreviewEnabled.value || !video.videoUrl || !video.duration)
+        return;
+    onCardLeave();
     const el = event.currentTarget.querySelector(".card-hover-video");
     if (!el) return;
     activeVideoEl = el;
     el.src = video.videoUrl;
     el.muted = true;
     el.preload = "metadata";
-    let t = 0;
+    let seekTime = 0;
     const step = Math.max(video.duration / 12, 1);
     const startSeeking = () => {
         pendingMetadataListener = null;
-        if (activeVideoEl !== el) return; // user already left before metadata loaded
-        el.currentTime = t;
+        if (activeVideoEl !== el) return;
+        el.currentTime = seekTime;
         seekInterval = setInterval(() => {
-            t = (t + step) % video.duration;
-            el.currentTime = t;
+            seekTime = (seekTime + step) % video.duration;
+            el.currentTime = seekTime;
         }, 350);
     };
     if (el.readyState >= 1) {
@@ -88,7 +89,6 @@ function onCardLeave() {
         activeVideoEl.src = "";
         activeVideoEl = null;
     }
-    hoveredId.value = null;
 }
 
 const SORT_OPTIONS = computed(() => [
@@ -100,12 +100,9 @@ const SORT_OPTIONS = computed(() => [
 
 const filteredVideos = computed(() => {
     let list = videos.value;
-
     const q = searchQuery.value.trim().toLowerCase();
     if (q) list = list.filter((v) => v.fileName.toLowerCase().includes(q));
-
     if (showFavoritesOnly.value) list = list.filter((v) => isFavorite(v.id));
-
     list = [...list];
     switch (sortBy.value) {
         case "name":
@@ -117,180 +114,41 @@ const filteredVideos = computed(() => {
         case "duration":
             list.sort((a, b) => (b.duration || 0) - (a.duration || 0));
             break;
-        // 'date': already sorted by main process
     }
-
     return list;
 });
 
-const rootRef = ref(null);
-const colCount = ref(4);
-const colWidth = ref(200);
-const scrollTop = ref(0);
-const containerHeight = ref(0);
-const layoutItems = ref([]);
-
-function buildLayout(vids, cols, cw) {
-    if (!cw || !cols || !vids.length) {
-        layoutItems.value = [];
-        containerHeight.value = 0;
-        return;
-    }
-    const colHeights = new Array(cols).fill(0);
-    const items = [];
-    for (let i = 0; i < vids.length; i++) {
-        const video = vids[i];
-        let minCol = 0;
-        for (let c = 1; c < cols; c++) {
-            if (colHeights[c] < colHeights[minCol]) minCol = c;
-        }
+// --- useVirtualMasonry ---
+const {
+    containerRef,
+    containerHeight,
+    visibleItems,
+    colCount,
+    onScroll,
+    appendToLayout,
+} = useVirtualMasonry(filteredVideos, {
+    getItemHeight: (video, colWidth) => {
         const ratio =
             video.width && video.height
                 ? video.width / video.height
                 : DEFAULT_RATIO;
-        const cardHeight = Math.round(cw / ratio);
-        const x = minCol * (cw + GAP);
-        const y = colHeights[minCol];
-        items.push({
-            id: video.id,
-            video,
-            x,
-            y,
-            width: cw,
-            height: cardHeight,
-        });
-        colHeights[minCol] += cardHeight + GAP;
-    }
-    layoutItems.value = items;
-    containerHeight.value = Math.max(...colHeights);
-}
-
-const viewportHeight = ref(800);
-
-const visibleItems = computed(() => {
-    const top = scrollTop.value - VIEWPORT_MARGIN;
-    const bottom = scrollTop.value + viewportHeight.value + VIEWPORT_MARGIN;
-    return layoutItems.value.filter(
-        (item) => item.y + item.height > top && item.y < bottom,
-    );
+        return Math.round(colWidth / ratio);
+    },
+    getItemKey: (video) => video.id,
+    gap: 10,
+    viewportMargin: 400,
+    lookahead: 800,
+    idleDelay: 20_000,
+    paddingX: 32,
+    onItemsEntered: (items, zone) => {
+        const pending = items.filter(
+            (v) => !v.thumbnailUrl || !v.width || !v.duration,
+        );
+        if (pending.length) processVisible(pending.map((v) => v.filePath));
+    },
 });
 
-const handleScroll = (e) => {
-    scrollTop.value = e.target.scrollTop;
-    scheduleProcess(true); // scroll is user-driven — process immediately
-};
-
-let processTimer = null;
-let idleTimer = null;
-
-function needsWork(item) {
-    return (
-        !item.video.thumbnailUrl || !item.video.width || !item.video.duration
-    );
-}
-
-function runProcess() {
-    const top = scrollTop.value;
-    const bottom = top + viewportHeight.value;
-
-    const visible = [];
-    const lookahead = [];
-
-    for (const item of layoutItems.value) {
-        if (!needsWork(item)) continue;
-        const inViewport = item.y + item.height > top && item.y < bottom;
-        const inLookahead =
-            item.y + item.height > top - 200 &&
-            item.y < bottom + PROCESS_LOOKAHEAD;
-        if (inViewport) visible.push(item.video.filePath);
-        else if (inLookahead) lookahead.push(item.video.filePath);
-    }
-
-    const batch = [...visible, ...lookahead];
-    if (batch.length) processVisible(batch);
-}
-
-function runIdle() {
-    const top = scrollTop.value;
-    const bottom = top + viewportHeight.value;
-
-    const idlePaths = [];
-    for (const item of layoutItems.value) {
-        if (!needsWork(item)) continue;
-        const inActive =
-            item.y + item.height > top - 200 &&
-            item.y < bottom + PROCESS_LOOKAHEAD;
-        if (!inActive) idlePaths.push(item.video.filePath);
-    }
-
-    if (idlePaths.length) processVisible(idlePaths);
-}
-
-function scheduleProcess(immediate = false) {
-    clearTimeout(processTimer);
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(runIdle, IDLE_DELAY);
-
-    if (immediate) {
-        runProcess();
-    } else {
-        processTimer = setTimeout(runProcess, 150);
-    }
-}
-
-let savedScrollTop = null;
-function saveScroll() {
-    if (rootRef.value) savedScrollTop = rootRef.value.scrollTop;
-}
-function restoreScroll() {
-    if (rootRef.value && savedScrollTop !== null) {
-        rootRef.value.scrollTop = savedScrollTop;
-        savedScrollTop = null;
-    }
-}
-
-watch(
-    visibleItems,
-    () => {
-        nextTick(() => {
-            restoreScroll();
-            scheduleProcess(false);
-        });
-    },
-    { flush: "post" },
-);
-
-const getColsForWidth = (w) => {
-    if (w < 480) return 1;
-    if (w < 720) return 2;
-    if (w < 1024) return 3;
-    if (w < 1440) return 4;
-    return 5;
-};
-
-const updateLayout = () => {
-    if (!rootRef.value) return;
-    saveScroll();
-    const w = rootRef.value.clientWidth - 32;
-    viewportHeight.value = rootRef.value.clientHeight;
-    const cols = getColsForWidth(w);
-    const cw = Math.floor((w - (cols - 1) * GAP) / cols);
-    colCount.value = cols;
-    colWidth.value = cw;
-    buildLayout(filteredVideos.value, cols, cw);
-};
-
-let resizeObserver = null;
-watch(
-    filteredVideos,
-    () =>
-        nextTick(() => {
-            updateLayout();
-            scheduleProcess(false);
-        }),
-    { flush: "post" },
-);
-
+// Context menu
 const ctxMenu = ref(null);
 const ctxRef = ref(null);
 
@@ -302,11 +160,9 @@ const openContextMenu = (e, video) => {
     const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
     ctxMenu.value = { video, x, y };
 };
-
 const closeContextMenu = () => {
     ctxMenu.value = null;
 };
-
 const ctxShowInFolder = () => {
     showInFolder(ctxMenu.value.video.filePath);
     closeContextMenu();
@@ -328,6 +184,7 @@ const handleGlobalMousedown = (e) => {
     if (ctxRef.value && !ctxRef.value.contains(e.target)) closeContextMenu();
 };
 
+// Modal
 const modalVideo = ref(null);
 const modalIndex = ref(-1);
 
@@ -335,12 +192,10 @@ const openModal = (video) => {
     modalVideo.value = video;
     modalIndex.value = filteredVideos.value.findIndex((v) => v.id === video.id);
 };
-
 const closeModal = () => {
     modalVideo.value = null;
     modalIndex.value = -1;
 };
-
 const navigateModal = (dir) => {
     const list = filteredVideos.value;
     if (!list.length) return;
@@ -355,15 +210,11 @@ const handleKey = (e) => {
 };
 
 const isDraggingFolder = ref(false);
-
 let _unlistenDragDrop = null;
 let _unlistenDragEnter = null;
 let _unlistenDragLeave = null;
 
 onMounted(async () => {
-    resizeObserver = new ResizeObserver(() => updateLayout());
-    if (rootRef.value) resizeObserver.observe(rootRef.value);
-    updateLayout();
     document.addEventListener("keydown", handleKey);
     document.addEventListener("mousedown", handleGlobalMousedown);
 
@@ -383,8 +234,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-    resizeObserver?.disconnect();
-    clearTimeout(idleTimer);
     document.removeEventListener("keydown", handleKey);
     document.removeEventListener("mousedown", handleGlobalMousedown);
     _unlistenDragDrop?.();
@@ -396,8 +245,8 @@ onUnmounted(() => {
 <template>
     <div
         class="gallery-root"
-        ref="rootRef"
-        @scroll="handleScroll"
+        ref="containerRef"
+        @scroll="onScroll"
         :class="{ 'is-dragging': isDraggingFolder }"
     >
         <!-- Drop overlay -->
@@ -422,6 +271,8 @@ onUnmounted(() => {
                 </div>
             </div>
         </Transition>
+
+        <!-- Toolbar -->
         <div class="gallery-toolbar" v-if="!isLoading && videos.length">
             <div class="search-wrap">
                 <svg
@@ -513,6 +364,28 @@ onUnmounted(() => {
                 }}</span>
             </button>
 
+            <button
+                class="fav-filter-btn"
+                :class="{ active: hoverPreviewEnabled }"
+                @click="hoverPreviewEnabled = !hoverPreviewEnabled"
+                :title="t('gallery.hoverPreviewToggle')"
+                :aria-label="t('gallery.hoverPreviewToggle')"
+                :aria-pressed="hoverPreviewEnabled"
+            >
+                <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                >
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                    <line x1="19" y1="3" x2="19" y2="21" />
+                </svg>
+                <span>{{ t("gallery.hoverPreview") }}</span>
+            </button>
+
             <span class="result-count" v-if="searchQuery || showFavoritesOnly">
                 {{ t("gallery.resultCount", filteredVideos.length) }}
             </span>
@@ -523,32 +396,39 @@ onUnmounted(() => {
 
         <!-- Virtual canvas -->
         <div
-            v-else-if="layoutItems.length"
+            v-else-if="visibleItems.length || containerHeight > 0"
             class="gallery-canvas"
             :style="{ height: containerHeight + 56 + 'px' }"
         >
             <TransitionGroup name="card-remove">
                 <div
-                    v-for="item in visibleItems"
-                    :key="item.id"
+                    v-for="{
+                        key,
+                        item: video,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } in visibleItems"
+                    :key="key"
                     class="gallery-card"
                     :style="{
                         position: 'absolute',
-                        left: item.x + 'px',
-                        top: item.y + 'px',
-                        width: item.width + 'px',
-                        height: item.height + 'px',
+                        left: x + 'px',
+                        top: y + 'px',
+                        width: width + 'px',
+                        height: height + 'px',
                     }"
-                    @click="openModal(item.video)"
-                    @contextmenu="openContextMenu($event, item.video)"
-                    @mouseenter="onCardEnter($event, item.video)"
+                    @click="openModal(video)"
+                    @contextmenu="openContextMenu($event, video)"
+                    @mouseenter="onCardEnter($event, video)"
                     @mouseleave="onCardLeave"
                 >
                     <Transition name="thumb-fade">
                         <img
-                            v-if="item.video.thumbnailUrl"
-                            :key="item.video.thumbnailUrl"
-                            :src="item.video.thumbnailUrl"
+                            v-if="video.thumbnailUrl"
+                            :key="video.thumbnailUrl"
+                            :src="video.thumbnailUrl"
                             class="card-thumb"
                             draggable="false"
                             loading="lazy"
@@ -559,10 +439,9 @@ onUnmounted(() => {
                         </div>
                     </Transition>
 
-                    <!-- Hover seek preview — always in the DOM so querySelector finds it
-                         immediately without waiting for a Vue tick -->
+                    <!-- Hover seek preview -->
                     <video
-                        v-if="item.video.videoUrl"
+                        v-if="video.videoUrl"
                         class="card-hover-video"
                         muted
                         preload="none"
@@ -572,28 +451,26 @@ onUnmounted(() => {
                     <!-- Favorite button -->
                     <button
                         class="card-fav-btn"
-                        :class="{ active: isFavorite(item.video.id) }"
-                        @click.stop="toggleFavorite(item.video.id)"
+                        :class="{ active: isFavorite(video.id) }"
+                        @click.stop="toggleFavorite(video.id)"
                         :title="
-                            isFavorite(item.video.id)
+                            isFavorite(video.id)
                                 ? t('gallery.removeFavorite')
                                 : t('gallery.addFavorite')
                         "
                         :aria-label="
-                            isFavorite(item.video.id)
+                            isFavorite(video.id)
                                 ? t('gallery.removeFavorite')
                                 : t('gallery.addFavorite')
                         "
-                        :aria-pressed="isFavorite(item.video.id)"
+                        :aria-pressed="isFavorite(video.id)"
                     >
                         <svg
                             width="12"
                             height="12"
                             viewBox="0 0 24 24"
                             :fill="
-                                isFavorite(item.video.id)
-                                    ? 'currentColor'
-                                    : 'none'
+                                isFavorite(video.id) ? 'currentColor' : 'none'
                             "
                             stroke="currentColor"
                             stroke-width="2"
@@ -606,21 +483,19 @@ onUnmounted(() => {
 
                     <!-- Duration badge -->
                     <div
-                        v-if="formatDuration(item.video.duration)"
+                        v-if="formatDuration(video.duration)"
                         class="card-duration"
                     >
-                        {{ formatDuration(item.video.duration) }}
+                        {{ formatDuration(video.duration) }}
                     </div>
 
                     <!-- Hover overlay -->
                     <div class="card-overlay">
-                        <span class="card-filename">{{
-                            item.video.fileName
-                        }}</span>
+                        <span class="card-filename">{{ video.fileName }}</span>
                         <div class="card-meta-row">
-                            <span class="card-ext">{{ item.video.ext }}</span>
+                            <span class="card-ext">{{ video.ext }}</span>
                             <span class="card-size">{{
-                                item.video.sizeFormatted
+                                video.sizeFormatted
                             }}</span>
                         </div>
                     </div>
@@ -646,8 +521,8 @@ onUnmounted(() => {
             >
                 {{ t("gallery.videoCount", filteredVideos.length) }}
                 <template v-if="filteredVideos.length !== videos.length">
-                    {{ t("gallery.of") }} {{ videos.length }}</template
-                >
+                    {{ t("gallery.of") }} {{ videos.length }}
+                </template>
             </div>
         </div>
 
@@ -960,7 +835,6 @@ onUnmounted(() => {
         border-color 0.2s ease;
 }
 .gallery-card:hover {
-    will-change: transform;
     transform: scale(1.018);
     box-shadow: var(--shadow-lg);
     border-color: transparent;
@@ -1064,8 +938,7 @@ onUnmounted(() => {
     justify-content: center;
     width: 26px;
     height: 26px;
-    background: rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.6);
     border: none;
     border-radius: 50%;
     cursor: pointer;
@@ -1159,8 +1032,7 @@ onUnmounted(() => {
         opacity 0.2s ease,
         transform 0.2s ease;
     color: rgba(255, 255, 255, 0.85);
-    background: rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.6);
     border-radius: 50%;
     width: 44px;
     height: 44px;
